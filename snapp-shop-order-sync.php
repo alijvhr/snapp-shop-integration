@@ -18,6 +18,10 @@ final class Snapp_Shop_Order_Sync {
     private const META_ORDER_NUMBER = '_snapp_shop_order_number';
     private const META_FINGERPRINT = '_snapp_shop_order_fingerprint';
     private const API_BASE = 'https://apix.snappshop.ir/automation/v1';
+    private const MAX_PAGES_PER_SYNC = 10;
+    private const LOCK_DURATION_SECONDS = 5 * MINUTE_IN_SECONDS;
+    private const MAX_PROCESSED_ORDERS = 500;
+    private const API_TIMEOUT_SECONDS = 20;
 
     public function __construct() {
         add_action('admin_menu', [$this, 'add_admin_menu']);
@@ -28,7 +32,9 @@ final class Snapp_Shop_Order_Sync {
 
     public static function activate(): void {
         if (!wp_next_scheduled(self::CRON_HOOK)) {
-            wp_schedule_event(time() + 60, 'five_minutes', self::CRON_HOOK);
+            $schedules = wp_get_schedules();
+            $recurrence = isset($schedules['five_minutes']) ? 'five_minutes' : 'hourly';
+            wp_schedule_event(time() + 60, $recurrence, self::CRON_HOOK);
         }
     }
 
@@ -161,7 +167,7 @@ final class Snapp_Shop_Order_Sync {
         $duplicates = 0;
         $skipped = 0;
 
-        for ($page = 0; $page < 10; $page++) {
+        for ($page = 0; $page < self::MAX_PAGES_PER_SYNC; $page++) {
             $params = [];
             if ($cursor !== '') {
                 $params['cursor'] = $cursor;
@@ -237,7 +243,7 @@ final class Snapp_Shop_Order_Sync {
         if (get_transient($lockKey)) {
             return 'duplicate';
         }
-        set_transient($lockKey, '1', 5 * MINUTE_IN_SECONDS);
+        set_transient($lockKey, '1', self::LOCK_DURATION_SECONDS);
 
         try {
             if ($this->is_duplicate_order($orderNumber, $fingerprint)) {
@@ -261,7 +267,7 @@ final class Snapp_Shop_Order_Sync {
                 $quantity = max(1, (int) ($item['quantity'] ?? 1));
 
                 if ($sku === '') {
-                    $missingSkus[] = 'empty-sku';
+                    $missingSkus[] = 'item-without-sku';
                     continue;
                 }
 
@@ -342,8 +348,8 @@ final class Snapp_Shop_Order_Sync {
             'processed_at' => time(),
         ];
 
-        if (count($processed) > 500) {
-            $processed = array_slice($processed, -500, 500, true);
+        if (count($processed) > self::MAX_PROCESSED_ORDERS) {
+            $processed = array_slice($processed, -self::MAX_PROCESSED_ORDERS, self::MAX_PROCESSED_ORDERS, true);
         }
 
         update_option(self::PROCESSED_OPTION, $processed, false);
@@ -384,7 +390,7 @@ final class Snapp_Shop_Order_Sync {
         }
 
         $response = wp_remote_get($url, [
-            'timeout' => 20,
+            'timeout' => self::API_TIMEOUT_SECONDS,
             'headers' => [
                 'Authorization' => 'Bearer ' . $settings['token'],
                 'User-Agent' => $settings['user_agent'],
