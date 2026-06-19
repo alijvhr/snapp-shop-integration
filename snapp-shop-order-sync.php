@@ -108,7 +108,7 @@ final class Snapp_Shop_Order_Sync {
 
     public function render_settings_page(): void {
         if (!current_user_can('manage_woocommerce')) {
-            wp_die('Unauthorized');
+            wp_die('You do not have permission to manage WooCommerce settings.');
         }
 
         $message = isset($_GET['snapp_sync']) ? sanitize_text_field(wp_unslash($_GET['snapp_sync'])) : '';
@@ -136,7 +136,7 @@ final class Snapp_Shop_Order_Sync {
 
     public function handle_manual_sync(): void {
         if (!current_user_can('manage_woocommerce')) {
-            wp_die('Unauthorized');
+            wp_die('You do not have permission to manage WooCommerce settings.');
         }
 
         check_admin_referer('snapp_shop_sync_orders');
@@ -262,10 +262,16 @@ final class Snapp_Shop_Order_Sync {
             $hasLineItems = false;
             $missingSkus = [];
             $hasItemsWithoutSku = false;
+            $invalidQuantities = [];
 
-            foreach ($items as $item) {
+            foreach ($items as $index => $item) {
                 $sku = isset($item['sku']) ? trim((string) $item['sku']) : '';
-                $quantity = max(1, (int) ($item['quantity'] ?? 1));
+                $quantity = (int) ($item['quantity'] ?? 0);
+
+                if ($quantity <= 0) {
+                    $invalidQuantities[] = $sku !== '' ? $sku : 'item-' . ((int) $index + 1);
+                    continue;
+                }
 
                 if ($sku === '') {
                     $hasItemsWithoutSku = true;
@@ -313,6 +319,10 @@ final class Snapp_Shop_Order_Sync {
 
             if ($hasItemsWithoutSku) {
                 $wcOrder->add_order_note('Some imported items had no SKU and were skipped.');
+            }
+
+            if (!empty($invalidQuantities)) {
+                $wcOrder->add_order_note('Some imported items had invalid quantity and were skipped: ' . implode(', ', array_unique($invalidQuantities)));
             }
 
             $wcOrder->calculate_totals();
