@@ -97,12 +97,14 @@ final class Snapp_Shop_Order_Sync {
         $settings = $this->get_settings();
         $key = $args['key'];
         $value = isset($settings[$key]) ? (string) $settings[$key] : '';
+        $type = ($key === 'token') ? 'password' : 'text';
 
         printf(
-            '<input type="text" class="regular-text" name="%1$s[%2$s]" value="%3$s" />',
+            '<input type="%4$s" class="regular-text" autocomplete="off" name="%1$s[%2$s]" value="%3$s" />',
             esc_attr(self::SETTINGS_OPTION),
             esc_attr($key),
-            esc_attr($value)
+            esc_attr($value),
+            esc_attr($type)
         );
     }
 
