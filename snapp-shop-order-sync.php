@@ -4,6 +4,8 @@
  * Description: Fetches Snapp Shop order events and creates corresponding WooCommerce orders by matching items with product SKU.
  * Version: 1.0.0
  * Author: Snapp Shop Integration
+ * Text Domain: snapp-shop-order-sync
+ * Domain Path: /languages
  */
 
 if (!defined('ABSPATH')) {
