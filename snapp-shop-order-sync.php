@@ -34,7 +34,7 @@ final class Snapp_Shop_Order_Sync {
         if (!wp_next_scheduled(self::CRON_HOOK)) {
             $schedules = wp_get_schedules();
             $recurrence = isset($schedules['five_minutes']) ? 'five_minutes' : 'hourly';
-            wp_schedule_event(time() + 60, $recurrence, self::CRON_HOOK);
+            wp_schedule_event(time(), $recurrence, self::CRON_HOOK);
         }
     }
 
@@ -261,13 +261,14 @@ final class Snapp_Shop_Order_Sync {
             }
             $hasLineItems = false;
             $missingSkus = [];
+            $hasItemsWithoutSku = false;
 
             foreach ($items as $item) {
                 $sku = isset($item['sku']) ? trim((string) $item['sku']) : '';
                 $quantity = max(1, (int) ($item['quantity'] ?? 1));
 
                 if ($sku === '') {
-                    $missingSkus[] = 'item-without-sku';
+                    $hasItemsWithoutSku = true;
                     continue;
                 }
 
@@ -308,6 +309,10 @@ final class Snapp_Shop_Order_Sync {
 
             if (!empty($missingSkus)) {
                 $wcOrder->add_order_note('Some Snapp Shop SKUs were not found in WooCommerce and were skipped: ' . implode(', ', array_unique($missingSkus)));
+            }
+
+            if ($hasItemsWithoutSku) {
+                $wcOrder->add_order_note('Some imported items had no SKU and were skipped.');
             }
 
             $wcOrder->calculate_totals();
@@ -445,6 +450,6 @@ add_filter('cron_schedules', static function (array $schedules): array {
     return $schedules;
 });
 
-$snappShopOrderSync = new Snapp_Shop_Order_Sync();
+$snapp_shop_order_sync = new Snapp_Shop_Order_Sync();
 register_activation_hook(__FILE__, ['Snapp_Shop_Order_Sync', 'activate']);
 register_deactivation_hook(__FILE__, ['Snapp_Shop_Order_Sync', 'deactivate']);
