@@ -9,11 +9,157 @@ final class Snapp_Shop_Crawler {
         register_rest_route(self::NAMESPACE, '/products/(?P<product_code>\d+)', ['methods' => WP_REST_Server::READABLE, 'callback' => [$this, 'product'], 'permission_callback' => '__return_true']);
     }
     public function products(WP_REST_Request $request): WP_REST_Response {
-        if (!function_exists('wc_get_products')) return new WP_REST_Response(['status' => false, 'message' => 'WooCommerce is required.'], 503); $page = max(1, absint($request['page'])); $per = min(self::MAX_PER_PAGE, max(5, absint($request['per_page']))); $items = $this->eligible_products(); $total = count($items); $slice = array_slice($items, ($page - 1) * $per, $per);
-        return new WP_REST_Response(['status' => true, 'data' => ['products' => array_map(fn($product) => ['id' => $product->get_id(), 'code' => $product->get_id(), 'active' => $this->active($product), 'url' => get_permalink($product->get_id())], $slice), 'current_page' => $page, 'per_page' => $per, 'total_items' => $total, 'total_pages' => (int) ceil($total / $per)]]);
+        $page = max(1, absint($request['page']));
+        $per = min(self::MAX_PER_PAGE, max(5, absint($request['per_page'])));
+        $result = $this->eligible_products($page, $per);
+
+        return new WP_REST_Response([
+            'status' => true,
+            'data' => [
+                'products' => array_map(static function (object $product): array {
+                    return [
+                        'id' => (int) $product->id,
+                        'code' => (int) $product->id,
+                        'active' => (bool) $product->active,
+                        'url' => (string) get_permalink((int) $product->id),
+                    ];
+                }, $result['items']),
+                'current_page' => $page,
+                'per_page' => $per,
+                'total_items' => $result['total'],
+                'total_pages' => (int) ceil($result['total'] / $per),
+            ],
+        ]);
     }
     public function product(WP_REST_Request $request) { $product = function_exists('wc_get_product') ? wc_get_product(absint($request['product_code'])) : false; if (!$product || $product->get_status() !== 'publish' || !$this->is_eligible($product)) return new WP_Error('snappshop_product_not_found', 'Product not found.', ['status' => 404]); return new WP_REST_Response(['status' => true, 'data' => $this->details($product)]); }
-    private function eligible_products(): array { $ids = Snapp_Shop_Category_Catalogue::mapped_wp_category_ids(); if (!$ids) return []; $products = wc_get_products(['status' => 'publish', 'limit' => -1, 'return' => 'objects']); $products = array_filter($products, fn($product) => $this->is_eligible($product)); usort($products, fn($a, $b) => $this->inclusion_date($b) <=> $this->inclusion_date($a) ?: $a->get_id() <=> $b->get_id()); return $products; }
+    private function eligible_products(int $page, int $per): array
+    {
+        global $wpdb;
+
+        $categoryDates = [];
+        foreach (Snapp_Shop_Category_Catalogue::get_mappings() as $mapping) {
+            $categoryId = absint($mapping['wp_category_id'] ?? 0);
+            if (!$categoryId) continue;
+            $categoryDates[$categoryId] = max($categoryDates[$categoryId] ?? 0, (int) ($mapping['included_at'] ?? 0));
+        }
+        if (!$categoryDates) return ['items' => [], 'total' => 0];
+
+        $settings = get_option('snapp_shop_order_sync_settings', []);
+        $excludedBrands = array_values(array_filter(array_map(
+            'sanitize_title',
+            preg_split('/[\r\n,]+/', (string) ($settings['excluded_brands'] ?? ''))
+        )));
+
+        [$eligibleSql, $eligibleParams] = $this->eligible_products_sql($categoryDates, $excludedBrands);
+        $query = "
+            SELECT result.id, result.active, result.total_items, result.is_total, result.inclusion_date
+            FROM (
+                SELECT page.id, page.active, page.inclusion_date, 0 AS total_items, 0 AS is_total
+                FROM (
+                    SELECT eligible.id, eligible.active, eligible.inclusion_date
+                    FROM ({$eligibleSql}) AS eligible
+                    ORDER BY eligible.inclusion_date DESC, eligible.id ASC
+                    LIMIT %d OFFSET %d
+                ) AS page
+                UNION ALL
+                SELECT NULL AS id, 0 AS active, NULL AS inclusion_date, COUNT(*) AS total_items, 1 AS is_total
+                FROM ({$eligibleSql}) AS countable
+            ) AS result
+            ORDER BY result.is_total ASC, result.inclusion_date DESC, result.id ASC";
+        $params = array_merge($eligibleParams, [$per, ($page - 1) * $per], $eligibleParams);
+        $rows = $wpdb->get_results($wpdb->prepare($query, ...$params));
+
+        $items = [];
+        $total = 0;
+        foreach (is_array($rows) ? $rows : [] as $row) {
+            if ((int) $row->is_total === 1) {
+                $total = (int) $row->total_items;
+                continue;
+            }
+            $items[] = $row;
+        }
+
+        return [
+            'items' => $items,
+            'total' => $total,
+        ];
+    }
+
+    /**
+     * Build the complete list query. It deliberately returns scalar post rows,
+     * not WC_Product objects, and is embedded twice so pagination and the total
+     * are returned by one database statement.
+     */
+    private function eligible_products_sql(array $categoryDates, array $excludedBrands): array
+    {
+        global $wpdb;
+
+        $categoryIds = array_keys($categoryDates);
+        $categoryPlaceholders = implode(', ', array_fill(0, count($categoryIds), '%d'));
+        $inclusionCase = 'CASE mapped_tax.term_id';
+        $inclusionParams = [];
+        foreach ($categoryDates as $categoryId => $includedAt) {
+            $inclusionCase .= ' WHEN %d THEN %d';
+            $inclusionParams[] = $categoryId;
+            $inclusionParams[] = $includedAt;
+        }
+        $inclusionCase .= ' ELSE 0 END';
+
+        $brandTaxonomies = ['product_brand', 'pwb-brand', 'pa_brand', 'brand'];
+        $brandJoin = '';
+        $brandParams = [];
+        $excludedSql = '';
+        $excludedParams = [];
+        if ($excludedBrands) {
+            $brandTaxonomyPlaceholders = implode(', ', array_fill(0, count($brandTaxonomies), '%s'));
+            $brandJoin = "
+                LEFT JOIN (
+                    SELECT brand_rel.object_id,
+                        SUBSTRING_INDEX(
+                            GROUP_CONCAT(
+                                brand_term.slug
+                                ORDER BY FIELD(brand_tax.taxonomy, {$brandTaxonomyPlaceholders}), brand_term.name, brand_term.term_id
+                                SEPARATOR ','
+                            ), ',', 1
+                        ) AS brand_slug
+                    FROM {$wpdb->term_relationships} AS brand_rel
+                    INNER JOIN {$wpdb->term_taxonomy} AS brand_tax
+                        ON brand_tax.term_taxonomy_id = brand_rel.term_taxonomy_id
+                    INNER JOIN {$wpdb->terms} AS brand_term
+                        ON brand_term.term_id = brand_tax.term_id
+                    WHERE brand_tax.taxonomy IN ({$brandTaxonomyPlaceholders})
+                    GROUP BY brand_rel.object_id
+                ) AS brands ON brands.object_id = p.ID";
+            $brandParams = array_merge($brandTaxonomies, $brandTaxonomies);
+            $excludedSql = ' AND (brands.brand_slug IS NULL OR brands.brand_slug NOT IN (' . implode(', ', array_fill(0, count($excludedBrands), '%s')) . '))';
+            $excludedParams = $excludedBrands;
+        }
+
+        $sql = "
+            SELECT
+                p.ID AS id,
+                MAX({$inclusionCase}) AS inclusion_date,
+                MAX(CASE WHEN COALESCE(visibility.meta_value, 'visible') = 'hidden' THEN 0 ELSE 1 END) AS active
+            FROM {$wpdb->posts} AS p
+            {$brandJoin}
+            INNER JOIN {$wpdb->term_relationships} AS mapped_rel
+                ON mapped_rel.object_id = p.ID
+            INNER JOIN {$wpdb->term_taxonomy} AS mapped_tax
+                ON mapped_tax.term_taxonomy_id = mapped_rel.term_taxonomy_id
+                AND mapped_tax.taxonomy = 'product_cat'
+            LEFT JOIN {$wpdb->postmeta} AS visibility
+                ON visibility.post_id = p.ID
+                AND visibility.meta_key = '_catalog_visibility'
+            WHERE p.post_type = 'product'
+                AND p.post_status = 'publish'
+                AND mapped_tax.term_id IN ({$categoryPlaceholders})
+                {$excludedSql}
+            GROUP BY p.ID
+        ";
+
+        // Placeholder order follows the SQL: SELECT CASE, brand JOIN, category IN, brand exclusion.
+        return [$sql, array_merge($inclusionParams, $brandParams, $categoryIds, $excludedParams)];
+    }
     private function is_eligible(WC_Product $product): bool { $mapped = Snapp_Shop_Category_Catalogue::mapped_wp_category_ids(); $productCategories = wp_get_post_terms($product->get_id(), 'product_cat', ['fields' => 'ids']); return (bool) array_intersect($mapped, $productCategories) && !in_array(sanitize_title($this->brand($product)), $this->excluded_brands(), true); }
     private function inclusion_date(WC_Product $product): int { $dates = array_map(static fn($id) => Snapp_Shop_Category_Catalogue::inclusion_for_wp_category((int) $id), wp_get_post_terms($product->get_id(), 'product_cat', ['fields' => 'ids'])); return empty($dates) ? 0 : max($dates); }
     private function excluded_brands(): array { $settings = get_option('snapp_shop_order_sync_settings', []); return array_values(array_filter(array_map('sanitize_title', preg_split('/[\r\n,]+/', (string) ($settings['excluded_brands'] ?? ''))))); }
