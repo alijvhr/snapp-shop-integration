@@ -75,8 +75,8 @@ final class Snapp_Shop_Settings
             return;
         }
 
-        wp_enqueue_style('snapp-shop-admin', SNAPP_SHOP_PLUGIN_URL . 'assets/css/admin.css', [], '1.2.0');
-        wp_enqueue_script('snapp-shop-admin', SNAPP_SHOP_PLUGIN_URL . 'assets/js/admin.js', [], '1.2.0', true);
+        wp_enqueue_style('snapp-shop-admin', SNAPP_SHOP_PLUGIN_URL . 'assets/css/admin.css', [], '1.3.0');
+        wp_enqueue_script('snapp-shop-admin', SNAPP_SHOP_PLUGIN_URL . 'assets/js/admin.js', [], '1.3.0', true);
     }
 
     public function sanitize(array $input): array
