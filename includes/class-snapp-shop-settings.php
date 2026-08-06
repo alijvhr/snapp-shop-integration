@@ -11,9 +11,9 @@ final class Snapp_Shop_Settings
     public const PAGE = 'snapp-shop-order-sync';
 
     private const TABS = [
-        'settings' => 'Settings',
+        'settings'   => 'Settings',
         'categories' => 'Category Mapping',
-        'orders' => 'Orders & API',
+        'orders'     => 'Orders & API',
     ];
 
     public function __construct()
@@ -28,11 +28,11 @@ final class Snapp_Shop_Settings
         $value = get_option(self::OPTION, []);
 
         return array_merge([
-            'token' => '',
-            'vendor_id' => '',
-            'user_agent' => '',
+            'token'             => '',
+            'vendor_id'         => '',
+            'user_agent'        => '',
             'category_endpoint' => '/catalog/categories',
-            'excluded_brands' => '',
+            'excluded_brands'   => '',
         ], is_array($value) ? $value : []);
     }
 
@@ -51,20 +51,20 @@ final class Snapp_Shop_Settings
     public function register_settings(): void
     {
         register_setting(self::OPTION, self::OPTION, [
-            'type' => 'array',
+            'type'              => 'array',
             'sanitize_callback' => [$this, 'sanitize'],
-            'default' => [],
+            'default'           => [],
         ]);
 
         add_settings_section('snapp_shop_main', 'SnappShop credentials', '__return_false', self::OPTION);
 
         foreach ([
-            'token' => 'Token',
-            'vendor_id' => 'Vendor ID',
-            'user_agent' => 'User-Agent (Unique Code)',
-            'category_endpoint' => 'Category endpoint (supports {vendor_id})',
-            'excluded_brands' => 'Excluded brands (comma-separated)',
-        ] as $key => $label) {
+                     'token'             => 'Token',
+                     'vendor_id'         => 'Vendor ID',
+                     'user_agent'        => 'User-Agent (Unique Code)',
+                     'category_endpoint' => 'Category endpoint (supports {vendor_id})',
+                     'excluded_brands'   => 'Excluded brands (comma-separated)',
+                 ] as $key => $label) {
             add_settings_field($key, $label, [$this, 'render_field'], self::OPTION, 'snapp_shop_main', ['key' => $key]);
         }
     }
@@ -82,11 +82,11 @@ final class Snapp_Shop_Settings
     public function sanitize(array $input): array
     {
         return [
-            'token' => sanitize_text_field($input['token'] ?? ''),
-            'vendor_id' => sanitize_text_field($input['vendor_id'] ?? ''),
-            'user_agent' => sanitize_text_field($input['user_agent'] ?? ''),
+            'token'             => sanitize_text_field($input['token'] ?? ''),
+            'vendor_id'         => sanitize_text_field($input['vendor_id'] ?? ''),
+            'user_agent'        => sanitize_text_field($input['user_agent'] ?? ''),
             'category_endpoint' => esc_url_raw($input['category_endpoint'] ?? ''),
-            'excluded_brands' => sanitize_textarea_field($input['excluded_brands'] ?? ''),
+            'excluded_brands'   => sanitize_textarea_field($input['excluded_brands'] ?? ''),
         ];
     }
 
