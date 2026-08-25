@@ -6,6 +6,8 @@ if (!defined('ABSPATH')) {
 
 final class Snapp_Shop_Crawler
 {
+
+    private const DOMAIN = 'https://dapi.lilianmode.ir';
     private const NAMESPACE = 'snappshop/v1';
     private const MAX_PER_PAGE = 100;
 
@@ -22,16 +24,16 @@ final class Snapp_Shop_Crawler
         $page = max(1, absint($request['page']));
         $per = min(self::MAX_PER_PAGE, max(5, absint($request['per_page'])));
         $result = $this->eligible_products($page, $per);
-
+        $domain = site_url();
         return new WP_REST_Response([
             'status' => true,
             'data'   => [
-                'products'     => array_map(static function (object $product): array {
+                'products'     => array_map(static function (object $product) use ($domain): array {
                     return [
                         'id'     => (int)$product->id,
                         'code'   => (int)$product->id,
                         'active' => (bool)$product->active,
-                        'url'    => (string)get_permalink((int)$product->id),
+                        'url'    => str_replace($domain, self::DOMAIN, rest_url(self::NAMESPACE.'/products/' . (int)$product->id)),
                     ];
                 }, $result['items']),
                 'current_page' => $page,
