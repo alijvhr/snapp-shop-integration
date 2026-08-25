@@ -47,8 +47,10 @@ new Snapp_Shop_Product_Inventory_Sync($snapp_shop_settings, $snapp_shop_api_clie
 register_activation_hook(__FILE__, static function (): void {
     Snapp_Shop_Order_Importer::activate();
     Snapp_Shop_Category_Catalogue::activate();
+    Snapp_Shop_Product_Inventory_Sync::activate();
 });
 register_deactivation_hook(__FILE__, static function (): void {
     Snapp_Shop_Order_Importer::deactivate();
     Snapp_Shop_Category_Catalogue::deactivate();
+    Snapp_Shop_Product_Inventory_Sync::deactivate();
 });
