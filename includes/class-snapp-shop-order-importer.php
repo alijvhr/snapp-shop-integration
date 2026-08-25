@@ -47,32 +47,6 @@ final class Snapp_Shop_Order_Importer
         return $this->sync_fetched_orders($fetched);
     }
 
-    /** Import the orders returned by fetch_orders(). */
-    private function sync_fetched_orders(array $fetched): array
-    {
-        if (!class_exists('WooCommerce')) return ['message' => 'WooCommerce is required.'];
-
-        $settings = $this->settings->get();
-        $created = $updated = 0;
-        $skipped = (int)($fetched['skipped'] ?? 0);
-
-        foreach ((array)$fetched['orders'] as $fetched_order) {
-            $event = (array)($fetched_order['event'] ?? []);
-            $data = (array)($fetched_order['order'] ?? []);
-            $type = (string)($event['event_type'] ?? '');
-            if ($type === 'NEW_ORDER') {
-                $result = $this->upsert_order($settings['vendor_id'], $data, $type);
-                match ($result) {
-                    'created' => $created++,
-                    'updated' => $updated++,
-                    default   => $skipped++,
-                };
-            }
-        }
-
-        return ['message' => sprintf('Sync complete: %d created, %d updated, %d skipped.', $created, $updated, $skipped)];
-    }
-
     /**
      * Fetch order events and their complete order payloads without importing them.
      *
@@ -149,46 +123,118 @@ final class Snapp_Shop_Order_Importer
         ];
     }
 
-    private function upsert_order(string $vendorId, array $data, string $eventType): string
+    /** Import the orders returned by fetch_orders(). */
+    private function sync_fetched_orders(array $fetched): array
+    {
+        if (!class_exists('WooCommerce')) return ['message' => 'WooCommerce is required.'];
+
+        $settings = $this->settings->get();
+        $created = $updated = 0;
+        $skipped = (int)($fetched['skipped'] ?? 0);
+
+        foreach ((array)$fetched['orders'] as $fetched_order) {
+            $event = (array)($fetched_order['event'] ?? []);
+            $data = (array)($fetched_order['order'] ?? []);
+            $type = (string)($event['event_type'] ?? '');
+            $result = $this->upsert_order(
+                $settings['vendor_id'],
+                $data,
+                $type,
+                (string)($settings['default_shipping_method'] ?? '')
+            );
+            match ($result) {
+                'created' => $created++,
+                'updated' => $updated++,
+                default   => $skipped++,
+            };
+        }
+
+        return ['message' => sprintf('Sync complete: %d created, %d updated, %d skipped.', $created, $updated, $skipped)];
+    }
+
+    private function upsert_order(
+        string $vendorId,
+        array  $data,
+        string $eventType,
+        string $defaultShippingMethod = ''
+    ): string
     {
         $number = (string)($data['order_number'] ?? '');
         if (!$number) return 'skipped';
         $fingerprint = hash('sha256', wp_json_encode([$vendorId, $data]));
+        $defaultShippingMethod = (float)$defaultShippingMethod; // Default shipping price in the smallest currency unit (e.g., cents)
         $existing = wc_get_orders(['limit' => 1, 'return' => 'ids', 'meta_key' => self::ORDER_NUMBER_META, 'meta_value' => $number]);
         $order = $existing ? wc_get_order((int)$existing[0]) : wc_create_order();
         if (!$order || is_wp_error($order)) return 'skipped';
         if ($order->get_meta(self::FINGERPRINT_META, true) === $fingerprint) return 'skipped';
         foreach ($order->get_items('line_item') as $id => $item) $order->remove_item($id);
+        foreach ($order->get_items('shipping') as $id => $item) $order->remove_item($id);
+        $lineItemsTotal = 0.0;
         foreach ((array)($data['items'] ?? []) as $item) {
             $pid = (int)(explode('-', $item['sku'])[1] ?? 0);
             $product = wc_get_product($pid);
             $quantity = max(0, (int)($item['quantity'] ?? 0));
             if (!$product || !$quantity) continue;
-            $id = $order->add_product($product, $quantity);
-            if ($id && array_key_exists('final_price', $item)) {
-                $line = $order->get_item($id);
-                $total = (float)preg_replace('/[^0-9.\-]/', '', (string)$item['final_price']);
-                $line->set_subtotal($total);
-                $line->set_total($total);
-                $line->save();
-            }
+
+            // Build the line item directly so WooCommerce cannot initialize it
+            // from the product's current catalog price.
+            $unitPrice = (float)wc_format_decimal((string)$item['original_price']);
+            $finalPrice = (float)wc_format_decimal((string)$item['final_price']);
+            $lineTotal = $finalPrice * $quantity;
+            $line = new WC_Order_Item_Product();
+            $line->set_product($product);
+            $line->set_quantity($quantity);
+            $line->set_subtotal($unitPrice * $quantity);
+            $line->set_total($finalPrice * $quantity);
+            $order->add_item($line);
+            $lineItemsTotal += $lineTotal;
         }
         if (!$order->get_items('line_item')) return 'skipped';
+        $line = new WC_Order_Item_Shipping();
+        $line->set_method_title('Tipax');
+        $line->set_total($defaultShippingMethod);
+        $order->add_item($line);
+        $lineItemsTotal += $defaultShippingMethod;
         $customer = (array)($data['customer'] ?? []);
-        $order->set_address([
-            'first_name' => sanitize_text_field($customer['first_name'] ?? ''),
+        $address = [
+            'first_name' => sanitize_text_field($customer['first_name']),
             'last_name'  => sanitize_text_field($customer['last_name'] ?? ''),
-            'phone'      => sanitize_text_field($customer['phone'] ?? ''),
-        ], 'billing');
+            'phone'      => sanitize_text_field($customer['address']['phone'] ?? ''),
+            'state'      => sanitize_text_field($customer['address']['province'] ?? ''),
+            'city'       => sanitize_text_field($customer['address']['city'] ?? ''),
+            'address_1'  => sanitize_text_field($customer['address']['address']),
+            'address_2'  => sanitize_text_field("{$customer['address']['house_unit']} - {$customer['address']['house_number']}"),
+            'postcode'   => sanitize_text_field($customer['address']['postal_code'] ?? ''),
+        ];
+        $order->set_address($address, 'billing');
+        $order->set_address($address, 'shipping');
         $order->update_meta_data(self::ORDER_NUMBER_META, $number);
         $order->update_meta_data(self::FINGERPRINT_META, $fingerprint);
         $order->update_meta_data('_snapp_shop_vendor_id', $vendorId);
+        $order->update_meta_data('_wc_order_attribution_origin', 'SnappShop');
+        $order->update_meta_data('_wc_order_attribution_source_type', 'utm');
+        $order->update_meta_data('_wc_order_attribution_source', 'SnappShop');
+        $order->update_meta_data('_wc_order_attribution_utm_source', 'SnappShop');
+        $order->update_meta_data('_wc_order_attribution_utm_medium', 'platform');
+        $order->update_meta_data('_wc_order_attribution_utm_campaign', 'simple');
+        // Store both the gateway identifier and its human-readable label.
+        $order->set_payment_method('snappshop');
+        $order->set_payment_method_title('SnappShop');
         $status = strtoupper((string)($data['order_status'] ?? ''));
-//        $order->set_status();
+        $order->set_status(match ($status) {
+            'CONFIRMED' => 'processing',
+            'CANCELLED' => 'cancelled',
+            'DELIVERED' => 'completed',
+            default     => 'on-hold',
+        });
         $order->calculate_totals();
+        // The imported order total must reflect the imported line totals, not
+        // the current catalog price of the linked products.
+        $order->set_total($lineItemsTotal);
         $order->save();
         return $existing ? 'updated' : 'created';
     }
+
 
     /**
      * Dump fetched order events and payloads through WP-CLI.

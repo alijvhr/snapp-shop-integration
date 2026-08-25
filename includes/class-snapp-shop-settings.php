@@ -33,6 +33,7 @@ final class Snapp_Shop_Settings
             'user_agent'        => '',
             'category_endpoint' => '/catalog/categories',
             'excluded_brands'   => '',
+            'default_shipping_method' => '',
         ], is_array($value) ? $value : []);
     }
 
@@ -64,6 +65,7 @@ final class Snapp_Shop_Settings
                      'user_agent'        => 'User-Agent (Unique Code)',
                      'category_endpoint' => 'Category endpoint (supports {vendor_id})',
                      'excluded_brands'   => 'Excluded brands (comma-separated)',
+                     'default_shipping_method' => 'Default shipping method',
                  ] as $key => $label) {
             add_settings_field($key, $label, [$this, 'render_field'], self::OPTION, 'snapp_shop_main', ['key' => $key]);
         }
@@ -87,6 +89,7 @@ final class Snapp_Shop_Settings
             'user_agent'        => sanitize_text_field($input['user_agent'] ?? ''),
             'category_endpoint' => esc_url_raw($input['category_endpoint'] ?? ''),
             'excluded_brands'   => sanitize_textarea_field($input['excluded_brands'] ?? ''),
+            'default_shipping_method' => sanitize_text_field($input['default_shipping_method'] ?? ''),
         ];
     }
 
@@ -94,6 +97,26 @@ final class Snapp_Shop_Settings
     {
         $key = $args['key'];
         $settings = $this->get();
+
+        if ($key === 'default_shipping_method') {
+            $methods = $this->get_available_shipping_methods();
+            printf('<select class="regular-text" name="%s[%s]">', esc_attr(self::OPTION), esc_attr($key));
+            printf('<option value="">%s</option>', esc_html__('Do not add a shipping method', 'snapp-shop-order-sync'));
+            foreach ($methods as $value => $label) {
+                printf(
+                    '<option value="%s"%s>%s</option>',
+                    esc_attr($value),
+                    selected($settings[$key], $value, false),
+                    esc_html($label)
+                );
+            }
+            echo '</select>';
+            if (!$methods) {
+                echo '<p class="description">Configure an enabled shipping method in WooCommerce first.</p>';
+            }
+            return;
+        }
+
         $type = $key === 'token' ? 'password' : ($key === 'excluded_brands' ? 'textarea' : 'text');
 
         if ($type === 'textarea') {
@@ -102,6 +125,39 @@ final class Snapp_Shop_Settings
         }
 
         printf('<input type="%s" class="regular-text" autocomplete="off" name="%s[%s]" value="%s" />', $type, esc_attr(self::OPTION), esc_attr($key), esc_attr($settings[$key]));
+    }
+
+    /** @return array<string, string> */
+    private function get_available_shipping_methods(): array
+    {
+        if (!class_exists('WC_Shipping_Zones')) {
+            return [];
+        }
+
+        $methods = [];
+        $zones = WC_Shipping_Zones::get_zones();
+        $zones[] = [
+            'zone_name' => __('Rest of the world', 'woocommerce'),
+            'shipping_methods' => WC_Shipping_Zones::get_zone(0)->get_shipping_methods(true),
+        ];
+
+        foreach ($zones as $zone) {
+            foreach ((array)($zone['shipping_methods'] ?? []) as $method) {
+                if (!$method instanceof WC_Shipping_Method || $method->get_enabled() !== 'yes') {
+                    continue;
+                }
+
+                $value = $method->get_method_id() . ':' . $method->get_instance_id();
+                $label = $method->get_title() . ' — ' . ($zone['zone_name'] ?? '');
+                $cost = trim((string)$method->get_option('cost', ''));
+                if ($cost !== '') {
+                    $label .= ' (' . $cost . ')';
+                }
+                $methods[$value] = $label;
+            }
+        }
+
+        return $methods;
     }
 
     public function render_page(): void
