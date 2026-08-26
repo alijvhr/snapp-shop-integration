@@ -143,6 +143,9 @@ final class Snapp_Shop_Category_Catalogue
             }
         }
         update_option(self::MAPPINGS_OPTION, $new, false);
+        if ($old !== $new) {
+            do_action('snapp_shop_category_mappings_changed');
+        }
         $this->redirect('Category mappings saved.');
     }
 
