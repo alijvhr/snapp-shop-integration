@@ -159,11 +159,15 @@ final class Snapp_Shop_Crawler
             INNER JOIN {$wpdb->term_taxonomy} AS mapped_tax
                 ON mapped_tax.term_taxonomy_id = mapped_rel.term_taxonomy_id
                 AND mapped_tax.taxonomy = 'product_cat'
+            INNER JOIN {$wpdb->postmeta} AS stock_status
+                ON stock_status.post_id = p.ID
+                AND stock_status.meta_key = '_stock_status'
             LEFT JOIN {$wpdb->postmeta} AS visibility
                 ON visibility.post_id = p.ID
                 AND visibility.meta_key = '_catalog_visibility'
             WHERE p.post_type = 'product'
                 AND p.post_status = 'publish'
+                AND stock_status.meta_value = 'instock'
                 AND mapped_tax.term_id IN ({$categoryPlaceholders})
                 {$excludedSql}
             GROUP BY p.ID
@@ -176,7 +180,7 @@ final class Snapp_Shop_Crawler
     public function product(WP_REST_Request $request)
     {
         $product = function_exists('wc_get_product') ? wc_get_product(absint($request['product_code'])) : false;
-        if (!$product || $product->get_status() !== 'publish' || !$this->is_eligible($product)) return new WP_Error('snappshop_product_not_found', 'Product not found.', ['status' => 404]);
+        if (!$product || $product->get_status() !== 'publish' || !$this->is_eligible($product) || !$this->is_in_stock($product)) return new WP_Error('snappshop_product_not_found', 'Product not found.', ['status' => 404]);
         return new WP_REST_Response(['status' => true, 'data' => $this->details($product)]);
     }
 
@@ -185,6 +189,11 @@ final class Snapp_Shop_Crawler
         $mapped = Snapp_Shop_Category_Catalogue::mapped_wp_category_ids();
         $productCategories = wp_get_post_terms($product->get_id(), 'product_cat', ['fields' => 'ids']);
         return (bool)array_intersect($mapped, $productCategories) && !in_array(sanitize_title($this->brand($product)), $this->excluded_brands(), true);
+    }
+
+    private function is_in_stock(WC_Product $product): bool
+    {
+        return $product->get_stock_status() === 'instock';
     }
 
     private function details(WC_Product $product): array
