@@ -21,7 +21,11 @@ final class Snapp_Shop_Order_Importer
         }
     }
 
-    public static function activate(): void { if (!wp_next_scheduled(self::CRON_HOOK)) wp_schedule_event(time(), isset(wp_get_schedules()['five_minutes']) ? 'five_minutes' : 'hourly', self::CRON_HOOK); }
+    public static function activate(): void
+    {
+        if (!wp_next_scheduled(self::CRON_HOOK))
+            wp_schedule_event(time(), isset(wp_get_schedules()['five_minutes']) ? 'five_minutes' : 'hourly', self::CRON_HOOK);
+    }
 
     public static function deactivate(): void { wp_clear_scheduled_hook(self::CRON_HOOK); }
 
@@ -131,6 +135,8 @@ final class Snapp_Shop_Order_Importer
         $settings = $this->settings->get();
         $created = $updated = 0;
         $skipped = (int)($fetched['skipped'] ?? 0);
+        error_log('Fetched snapp orders: ' . count((array)$fetched['orders']) . ', skipped: ' . $skipped);
+        error_log(json_encode($fetched, JSON_UNESCAPED_UNICODE));
 
         foreach ((array)$fetched['orders'] as $fetched_order) {
             $event = (array)($fetched_order['event'] ?? []);
@@ -191,7 +197,7 @@ final class Snapp_Shop_Order_Importer
         }
         if (!$order->get_items('line_item')) return 'skipped';
         $line = new WC_Order_Item_Shipping();
-        $line->set_method_title('Tipax');
+        $line->set_method_title('تیپاکس');
         $line->set_total($defaultShippingMethod);
         $order->add_item($line);
         $lineItemsTotal += $defaultShippingMethod;
