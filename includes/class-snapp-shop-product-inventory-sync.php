@@ -21,8 +21,7 @@ final class Snapp_Shop_Product_Inventory_Sync
 
     public function __construct(private Snapp_Shop_Settings $settings, private Snapp_Shop_Api_Client $api)
     {
-        add_action('save_post_product', [$this, 'queue_saved_product'], 20, 3);
-        add_action('save_post_product_variation', [$this, 'queue_saved_product'], 20, 3);
+        add_action('woocommerce_after_product_object_save', [$this, 'queue_saved_product'], 20);
         add_action('woocommerce_product_set_stock', [$this, 'queue_product'], 20);
         add_action('woocommerce_variation_set_stock', [$this, 'queue_product'], 20);
         add_action('woocommerce_variation_options_inventory', [$this, 'render_last_sync_field'], 10, 3);
@@ -159,17 +158,31 @@ final class Snapp_Shop_Product_Inventory_Sync
     /** Backwards-compatible entry point for integrations that called the old save callback. */
     public function sync_saved_product($postId, $post, $update): void
     {
-        $this->queue_saved_product($postId, $post, $update);
+        $this->queue_saved_product($postId);
     }
 
-    /** Queue a product after WordPress has saved it; the HTTP request runs in cron. */
-    public function queue_saved_product($postId, $post, $update): void
+    /** Queue variations after WooCommerce has saved a product; the HTTP request runs in cron. */
+    public function queue_saved_product($product): void
     {
-        if (wp_is_post_revision($postId) || wp_is_post_autosave($postId)) {
+        if (!is_object($product) || !method_exists($product, 'get_id')) {
+            $product = function_exists('wc_get_product') ? wc_get_product((int)$product) : false;
+        }
+        if (!$product) {
             return;
         }
 
-        $this->queue_product((int)$postId);
+        if ($product->is_type('variation')) {
+            $this->queue_product((int)$product->get_id());
+            return;
+        }
+
+        if (!$product->is_type('variable')) {
+            return;
+        }
+
+        foreach ($product->get_children() as $variationId) {
+            $this->queue_product((int)$variationId);
+        }
     }
 
     /** Queue a product when WooCommerce updates its stock directly. */
@@ -401,6 +414,11 @@ final class Snapp_Shop_Product_Inventory_Sync
             $date = new DateTime('today');
             $payload['special_price_start_at'] = $date->format('Y-m-d');
             $payload['special_price_end_at'] = $date->modify('+180 Days')->format('Y-m-d');
+        } else {
+            $payload['special_price'] = null;
+            $payload['special_price_stock'] = null;
+            $payload['special_price_start_at'] = null;
+            $payload['special_price_end_at'] = null;
         }
         return $payload;
     }
@@ -486,8 +504,6 @@ final class Snapp_Shop_Product_Inventory_Sync
             return ['updated' => 0, 'failed' => 0, 'message' => 'A sync is already running.'];
         }
 
-        error_log('Starting SnappShop product inventory sync...');
-
         set_transient(self::LOCK_TRANSIENT, 1, 5 * MINUTE_IN_SECONDS);
 
         try {
@@ -550,10 +566,11 @@ final class Snapp_Shop_Product_Inventory_Sync
                     usleep(self::REQUEST_DELAY_MICROSECONDS);
                 }
                 $reqNo++;
+                $payload = ['products' => array_column($batch['items'], 'payload')];
 
                 $result = $this->api->patch(
                     '/vendors/' . rawurlencode($settings['vendor_id']) . '/products',
-                    ['products' => array_column($batch['items'], 'payload')]
+                    $payload
                 );
 
                 if ($apiResponseOutput !== null) {
@@ -561,7 +578,9 @@ final class Snapp_Shop_Product_Inventory_Sync
                 }
 
                 if (is_wp_error($result) || !is_array($result['data'] ?? null)) {
+
                     error_log('SnappShop product inventory sync failed: ' . (is_wp_error($result) ? $result->get_error_message() : 'Invalid API response.'));
+                    error_log('Failed batch payload: ' . wp_json_encode($payload));
                     $failed += count($batch['items']);
                     continue;
                 }
