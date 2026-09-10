@@ -7,6 +7,7 @@ if (!defined('ABSPATH')) {
 final class Snapp_Shop_Product_Inventory_Sync
 {
     private const SIGNATURE_META = '_snapp_shop_product_sync_signature';
+    private const LAST_SYNC_META = '_snapp_shop_product_last_sync_at';
     /** Retained only to migrate queues created before the dedicated table existed. */
     private const LEGACY_QUEUE_OPTION = 'snapp_shop_product_inventory_sync_queue';
     private const QUEUE_TABLE_VERSION_OPTION = 'snapp_shop_product_inventory_sync_queue_table_version';
@@ -24,6 +25,7 @@ final class Snapp_Shop_Product_Inventory_Sync
         add_action('save_post_product_variation', [$this, 'queue_saved_product'], 20, 3);
         add_action('woocommerce_product_set_stock', [$this, 'queue_product'], 20);
         add_action('woocommerce_variation_set_stock', [$this, 'queue_product'], 20);
+        add_action('woocommerce_variation_options_inventory', [$this, 'render_last_sync_field'], 10, 3);
         add_action('snapp_shop_category_mappings_changed', [$this, 'reinitialize_queue']);
         add_action(self::CRON_HOOK, [$this, 'sync_products']);
 
@@ -245,7 +247,6 @@ final class Snapp_Shop_Product_Inventory_Sync
              INNER JOIN ' . $wpdb->posts . ' AS variation
                  ON variation.ID = queue.product_id
                  AND variation.post_type = \'product_variation\'
-                 AND variation.post_status = \'publish\'
              WHERE 1 = 1' . $cursorSql . '
              AND EXISTS (
                  SELECT 1
@@ -324,8 +325,47 @@ final class Snapp_Shop_Product_Inventory_Sync
                 : sprintf('SnappShop rejected product %d.', $productId)];
         }
 
-        update_post_meta($productId, self::SIGNATURE_META, hash('sha256', wp_json_encode($payload)));
+        $this->mark_product_synced($productId, hash('sha256', wp_json_encode($payload)));
         return ['success' => true, 'message' => sprintf('Product %d price and stock synced to SnappShop.', $productId)];
+    }
+
+    /** Show the last successful SnappShop sync in the variation editor. */
+    public function render_last_sync_field($loop, $variationData, $variation): void
+    {
+        $variationId = is_object($variation) && method_exists($variation, 'get_id')
+            ? (int)$variation->get_id()
+            : (int)($variation->ID ?? 0);
+        $lastSyncAt = (string)get_post_meta($variationId, self::LAST_SYNC_META, true);
+        $value = $lastSyncAt ? $this->format_last_sync($lastSyncAt) : __('Never', 'snapp-shop-order-sync');
+
+        woocommerce_wp_text_input([
+            'id'                => 'snapp_shop_last_sync_' . (int)$loop,
+            'label'             => __('SnappShop last sync', 'snapp-shop-order-sync'),
+            'value'             => $value,
+            'wrapper_class'     => 'form-row form-row-full',
+            'custom_attributes' => ['readonly' => 'readonly'],
+            'desc_tip'          => true,
+            'description'       => __('The last time this variation was successfully synchronized with SnappShop.', 'snapp-shop-order-sync'),
+        ]);
+    }
+
+    private function mark_product_synced(int $productId, string $signature): void
+    {
+        update_post_meta($productId, self::SIGNATURE_META, $signature);
+        update_post_meta($productId, self::LAST_SYNC_META, current_time('mysql', true));
+    }
+
+    private function format_last_sync(string $lastSyncAt): string
+    {
+        $timestamp = strtotime($lastSyncAt . ' UTC');
+        if (!$timestamp) {
+            return $lastSyncAt;
+        }
+
+        return wp_date(
+            get_option('date_format') . ' ' . get_option('time_format'),
+            $timestamp
+        );
     }
 
     private function build_payload(WC_Product $product): array
@@ -341,8 +381,12 @@ final class Snapp_Shop_Product_Inventory_Sync
         $regular_price = (int)$product->get_regular_price();
         $sale_price = (int)$product->get_sale_price();
 
-        if (!$id || $regular_price === 0 || $stock === 0) {
+        if (!$id) {
             return [];
+        }
+
+        if($product->get_status() !== 'publish') {
+            $stock = 0;
         }
 
         $payload = [
@@ -386,7 +430,6 @@ final class Snapp_Shop_Product_Inventory_Sync
 
             if (isset($responses[$index])
                 && is_array($responses[$index])
-                && (!array_key_exists('status', $responses[$index]) || $responses[$index]['status'] !== false)
             ) {
                 $successful[] = $index;
             }
@@ -527,7 +570,7 @@ final class Snapp_Shop_Product_Inventory_Sync
                 $successfulIds = [];
                 foreach ($successfulIndexes as $index) {
                     $item = $batch['items'][$index];
-                    update_post_meta($item['product_id'], self::SIGNATURE_META, $item['signature']);
+                    $this->mark_product_synced($item['product_id'], $item['signature']);
                     $successfulIds[] = $item['product_id'];
                     $updated++;
                 }
@@ -572,7 +615,6 @@ final class Snapp_Shop_Product_Inventory_Sync
                  ON category_tax.term_taxonomy_id = category_rel.term_taxonomy_id
                  AND category_tax.taxonomy = 'product_cat'
              WHERE variation.post_type = 'product_variation'
-             AND variation.post_status = 'publish'
              AND category_tax.term_id IN (" . implode(', ', array_fill(0, count($mappedCategoryIds), '%d')) . ")
              AND variation.post_modified_gmt > %s
              ORDER BY variation.post_modified_gmt DESC, variation.ID DESC",
@@ -619,7 +661,6 @@ final class Snapp_Shop_Product_Inventory_Sync
                  ON category_tax.term_taxonomy_id = category_rel.term_taxonomy_id
                  AND category_tax.taxonomy = 'product_cat'
              WHERE variation.post_type = 'product_variation'
-             AND variation.post_status = 'publish'
              AND category_tax.term_id IN (" . implode(', ', array_fill(0, count($mappedCategoryIds), '%d')) . ")
              ORDER BY variation.ID ASC",
             ...$mappedCategoryIds
@@ -638,8 +679,7 @@ final class Snapp_Shop_Product_Inventory_Sync
         $latestModified = $wpdb->get_var(
             "SELECT MAX(post_modified_gmt)
              FROM {$wpdb->posts}
-             WHERE post_type  = 'product_variation'
-             AND post_status = 'publish'"
+             WHERE post_type  = 'product_variation'"
         );
 
         if ($latestModified) {
